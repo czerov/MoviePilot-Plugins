@@ -1,13 +1,14 @@
 {
   "Pan302Bridge": {
     "name": "Pan302 联动",
-    "description": "在 MoviePilot 中联动 pan-302 的分享转存、离线移动、STRM 和转移整理。",
+    "description": "接收 pan-302 回调，并在 STRM 生成后刷新 Emby 媒体库。",
     "labels": "网盘,STRM,MoviePilot,pan-302",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "icon": "Moviepilot_A.png",
     "author": "czerov",
     "level": 1,
     "history": {
+      "v1.1.0": "新增 pan-302 回调后自动刷新 Emby 媒体库，支持测试 Emby 连接、手动刷新和指定媒体库 ID。",
       "v1.0.0": "新增 pan-302 联动插件，支持连接测试、状态查询、STRM 同步、转移规则触发和任务回调。"
     }
   }
