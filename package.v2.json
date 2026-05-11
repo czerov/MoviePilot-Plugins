@@ -1,0 +1,14 @@
+{
+  "Pan302Bridge": {
+    "name": "Pan302 联动",
+    "description": "在 MoviePilot 中联动 pan-302 的分享转存、离线移动、STRM 和转移整理。",
+    "labels": "网盘,STRM,MoviePilot,pan-302",
+    "version": "1.0.0",
+    "icon": "Moviepilot_A.png",
+    "author": "czerov",
+    "level": 1,
+    "history": {
+      "v1.0.0": "新增 pan-302 联动插件，支持连接测试、状态查询、STRM 同步、转移规则触发和任务回调。"
+    }
+  }
+}
