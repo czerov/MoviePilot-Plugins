@@ -19,7 +19,7 @@ class Pan302Bridge(_PluginBase):
     plugin_name = "Pan302 联动"
     plugin_desc = "接收 pan-302 回调，并调用 MoviePilot 已配置的媒体服务器刷新。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.3.0"
     plugin_author = "czerov"
     author_url = "https://github.com/czerov"
     plugin_config_prefix = "pan302bridge_"
@@ -27,7 +27,6 @@ class Pan302Bridge(_PluginBase):
     auth_level = 1
 
     _enabled = False
-    _callback_token = ""
     _refresh_mediaserver = True
     _refresh_events = "strm_generated,strm_sync_completed,share_transfer_completed,offline_move_completed"
     _refresh_delay = 0
@@ -36,17 +35,7 @@ class Pan302Bridge(_PluginBase):
     def init_plugin(self, config: Optional[dict] = None):
         config = config or {}
         self._enabled = bool(config.get("enabled"))
-        self._callback_token = (config.get("callback_token") or "").strip()
-        self._refresh_mediaserver = bool(config.get("refresh_mediaserver", True))
-        self._refresh_events = (
-            config.get("refresh_events")
-            or "strm_generated,strm_sync_completed,share_transfer_completed,offline_move_completed"
-        ).strip()
         self._notify_on_callback = bool(config.get("notify_on_callback", True))
-        try:
-            self._refresh_delay = max(0, int(config.get("refresh_delay") or 0))
-        except (TypeError, ValueError):
-            self._refresh_delay = 0
 
     @staticmethod
     def _now() -> str:
@@ -120,7 +109,6 @@ class Pan302Bridge(_PluginBase):
             "enabled": self._enabled,
             "refresh_mediaserver": self._refresh_mediaserver,
             "refresh_events": self._split_config_values(self._refresh_events),
-            "refresh_delay": self._refresh_delay,
             "notify_on_callback": self._notify_on_callback,
             "last_callback": self.get_data("last_callback"),
             "last_mediaserver_refresh": self.get_data("last_mediaserver_refresh"),
@@ -134,16 +122,6 @@ class Pan302Bridge(_PluginBase):
 
     def api_pan302_callback(self, data: Optional[dict] = None) -> Dict[str, Any]:
         data = data or {}
-        if self._callback_token and data.get("token") != self._callback_token:
-            callback = {
-                "success": False,
-                "message": "callback token 不正确",
-                "time": self._now(),
-                "event": data.get("event"),
-            }
-            self.save_data("last_callback", callback)
-            return {"success": False, "message": "callback token 不正确"}
-
         callback = dict(data)
         callback["success"] = True
         callback.setdefault("time", self._now())
@@ -296,64 +274,6 @@ class Pan302Bridge(_PluginBase):
                                     {
                                         "component": "VSwitch",
                                         "props": {
-                                            "model": "refresh_mediaserver",
-                                            "label": "回调后刷新 MoviePilot 媒体服务器",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "callback_token",
-                                            "label": "回调校验 Token",
-                                            "type": "password",
-                                            "clearable": True,
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "refresh_delay",
-                                            "label": "刷新延迟秒数",
-                                            "type": "number",
-                                            "min": 0,
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "refresh_events",
-                                            "label": "触发刷新的回调事件",
-                                            "placeholder": "strm_generated,strm_sync_completed",
-                                            "clearable": True,
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
                                             "model": "notify_on_callback",
                                             "label": "收到 pan-302 回调后发送 MoviePilot 通知",
                                         },
@@ -366,10 +286,6 @@ class Pan302Bridge(_PluginBase):
             }
         ], {
             "enabled": False,
-            "callback_token": "",
-            "refresh_mediaserver": True,
-            "refresh_events": "strm_generated,strm_sync_completed,share_transfer_completed,offline_move_completed",
-            "refresh_delay": 0,
             "notify_on_callback": True,
         }
 
