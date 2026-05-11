@@ -1,33 +1,34 @@
 # Pan302Bridge
 
-`Pan302Bridge` 是一个 MoviePilot V2 插件，用于接收 pan-302 的任务回调，并在 pan-302 生成 STRM 后触发 Emby 刷新媒体库。
+`Pan302Bridge` 是一个 MoviePilot V2 插件，用于接收 pan-302 的任务回调，并在 STRM 生成完成后调用 MoviePilot 已配置的媒体服务器刷新能力。
+
+插件不再重复配置 Emby 地址和 API Key。Emby、Jellyfin、Plex 等媒体服务器仍然在 MoviePilot 原有设置中维护。
 
 ## 功能
 
-- 保存 pan-302 地址和 Bearer Token。
-- 在插件详情页查看 pan-302 地址、最近连接、最近状态、最近动作和最近回调。
-- 通过插件 API 测试 pan-302 连接。
-- 触发 pan-302 全量或指定 STRM 同步。
-- 触发 pan-302 指定转移规则。
-- 接收 pan-302 回调，并可在 MoviePilot 内发送通知。
-- pan-302 回调 STRM 完成事件后，自动触发 Emby 全量或指定媒体库刷新。
-- 支持手动测试 Emby 连接和手动刷新 Emby。
+- 接收 pan-302 回调。
+- 校验可选的回调 Token。
+- 保存最近一次回调记录。
+- 根据事件名触发 MoviePilot 已启用媒体服务器刷新。
+- 可选发送 MoviePilot 通知。
+- 支持在插件详情页手动刷新媒体服务器。
 
 ## 配置
 
 - `启用 pan-302 联动`：是否启用插件。
-- `pan-302 地址`：例如 `http://192.168.6.36:3000`。
-- `pan-302 Token`：pan-302 的 Bearer Token。
-- `回调校验 Token`：pan-302 回调 MoviePilot 时提交的简单校验 Token。
-- `收到 pan-302 回调后发送 MoviePilot 通知`：启用后收到回调会调用 MoviePilot 通知。
-- `pan-302 回调后刷新 Emby 媒体库`：启用后，匹配事件的回调会触发 Emby 刷库。
-- `Emby 地址`：例如 `http://192.168.6.36:8096`，不要在末尾加 `/Library/Refresh`。
-- `Emby API Key`：Emby 后台创建的 API Key。
-- `Emby 媒体库 ID`：可选，多个用英文逗号分隔；留空时刷新全部媒体库。
-- `Emby 刷库延迟秒数`：可选，STRM 刚生成后延迟几秒再通知 Emby。
-- `触发 Emby 刷库的回调事件`：默认 `strm_generated,strm_sync_completed,share_transfer_completed,offline_move_completed`。
-- `快捷 STRM 名称`：可选，用于详情页按钮触发指定 STRM 同步。
-- `快捷转移规则名称`：可选，用于详情页按钮触发指定转移规则。
+- `回调后刷新 MoviePilot 媒体服务器`：启用后，匹配事件的回调会调用 MoviePilot 已配置的媒体服务器刷新。
+- `回调校验 Token`：可选。如果填写，pan-302 回调 JSON 中的 `token` 必须一致。
+- `刷新延迟秒数`：可选。STRM 刚生成后等待几秒再刷新媒体服务器。
+- `触发刷新的回调事件`：多个事件用英文逗号分隔。
+- `收到 pan-302 回调后发送 MoviePilot 通知`：启用后收到回调会发送通知。
+
+默认触发刷新的事件：
+
+```text
+strm_generated,strm_sync_completed,share_transfer_completed,offline_move_completed
+```
+
+`transfer_failed` 默认不会触发刷新。
 
 ## 插件 API
 
@@ -41,23 +42,28 @@ MoviePilot 会将插件 API 注册到：
 
 ```text
 GET  /status
-POST /test_connection
-POST /pan302_status
-POST /transfer_status
-POST /trigger_strm_sync
-POST /trigger_transfer_rule
+POST /refresh_mediaserver
 POST /pan302_callback
-POST /test_emby
-POST /refresh_emby
 ```
 
-## pan-302 回调示例
+## pan-302 回调地址
+
+pan-302 系统设置中的回调 URL 填：
+
+```text
+http://你的MoviePilot地址:3000/api/v1/plugin/Pan302Bridge/pan302_callback?apikey=你的MoviePilot_API_TOKEN
+```
+
+如果插件里没有填写 `回调校验 Token`，pan-302 请求体不需要额外带 `token`。
+
+如果插件里填写了 `回调校验 Token`，pan-302 请求体需要带同样的 `token`。
+
+## 回调示例
 
 ```json
 {
-  "token": "callback_token",
-  "event": "share_transfer_completed",
-  "title": "115 分享转存完成",
+  "event": "strm_generated",
+  "title": "pan-302 STRM 生成完成",
   "text": "资源已整理并生成 STRM",
   "cloudPath": "/media/video/xxx.mkv",
   "localPath": "",
@@ -67,45 +73,13 @@ POST /refresh_emby
 }
 ```
 
-建议事件名：
+带回调校验 Token 的示例：
 
-```text
-share_transfer_completed
-offline_move_completed
-strm_generated
-strm_sync_completed
-transfer_failed
-```
-
-默认只有下面事件会触发 Emby 刷库：
-
-```text
-strm_generated
-strm_sync_completed
-share_transfer_completed
-offline_move_completed
-```
-
-`transfer_failed` 默认只记录和通知，不触发 Emby 刷库。
-
-## Emby 刷库方式
-
-如果 `Emby 媒体库 ID` 留空，插件会调用 Emby：
-
-```text
-POST /emby/Library/Refresh
-```
-
-如果填写了媒体库 ID，例如：
-
-```text
-577,3,1959
-```
-
-插件会分别调用：
-
-```text
-POST /emby/Items/577/Refresh
-POST /emby/Items/3/Refresh
-POST /emby/Items/1959/Refresh
+```json
+{
+  "token": "callback_token",
+  "event": "strm_generated",
+  "title": "pan-302 STRM 生成完成",
+  "text": "资源已整理并生成 STRM"
+}
 ```
