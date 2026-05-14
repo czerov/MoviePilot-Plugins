@@ -1,6 +1,9 @@
 from datetime import datetime
 from time import sleep
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.error import HTTPError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from app.plugins import _PluginBase
 
@@ -17,9 +20,9 @@ except Exception:  # pragma: no cover - MoviePilot runtime provides app.log.
 
 class Pan302Bridge(_PluginBase):
     plugin_name = "Pan302 联动"
-    plugin_desc = "接收 pan-302 回调，并调用 MoviePilot 已配置的媒体服务器刷新。"
+    plugin_desc = "接收 pan-302 回调，并刷新 Emby 或 MoviePilot 媒体服务器。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.3.0"
+    plugin_version = "1.4.0"
     plugin_author = "czerov"
     author_url = "https://github.com/czerov"
     plugin_config_prefix = "pan302bridge_"
@@ -31,15 +34,23 @@ class Pan302Bridge(_PluginBase):
     _refresh_events = "strm_generated,strm_sync_completed,share_transfer_completed,offline_move_completed"
     _refresh_delay = 0
     _notify_on_callback = True
+    _emby_url = ""
+    _emby_api_key = ""
 
     def init_plugin(self, config: Optional[dict] = None):
         config = config or {}
         self._enabled = bool(config.get("enabled"))
         self._notify_on_callback = bool(config.get("notify_on_callback", True))
+        self._emby_url = self._normalize_base_url(config.get("emby_url"))
+        self._emby_api_key = (config.get("emby_api_key") or "").strip()
 
     @staticmethod
     def _now() -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    @staticmethod
+    def _normalize_base_url(url: Optional[str]) -> str:
+        return (url or "").strip().rstrip("/")
 
     @staticmethod
     def _split_config_values(value: str) -> List[str]:
@@ -59,6 +70,12 @@ class Pan302Bridge(_PluginBase):
 
     @staticmethod
     def _error_message(err: Exception) -> str:
+        if isinstance(err, HTTPError):
+            try:
+                detail = err.read().decode("utf-8", errors="replace")
+            except Exception:
+                detail = ""
+            return "HTTP %s: %s" % (err.code, detail or err.reason)
         return str(err)
 
     def _log_warning(self, message: str):
@@ -110,13 +127,15 @@ class Pan302Bridge(_PluginBase):
             "refresh_mediaserver": self._refresh_mediaserver,
             "refresh_events": self._split_config_values(self._refresh_events),
             "notify_on_callback": self._notify_on_callback,
+            "emby_url": self._emby_url,
+            "has_emby_api_key": bool(self._emby_api_key),
             "last_callback": self.get_data("last_callback"),
             "last_mediaserver_refresh": self.get_data("last_mediaserver_refresh"),
             "last_action": self.get_data("last_action"),
         }
 
     def api_refresh_mediaserver(self, data: Optional[dict] = None) -> Dict[str, Any]:
-        result = self._refresh_moviepilot_mediaserver(reason="manual", callback=data or {})
+        result = self._refresh_preferred_mediaserver(reason="manual", callback=data or {})
         self._save_action("refresh_mediaserver", bool(result.get("success")), result)
         return result
 
@@ -166,9 +185,77 @@ class Pan302Bridge(_PluginBase):
                 save_action=False,
             )
 
-        result = self._refresh_moviepilot_mediaserver(reason="pan302_callback", callback=callback)
+        result = self._refresh_preferred_mediaserver(reason="pan302_callback", callback=callback)
         self._save_action("refresh_mediaserver", bool(result.get("success")), result)
         return result
+
+    def _refresh_preferred_mediaserver(
+        self,
+        reason: str,
+        callback: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if self._emby_url and self._emby_api_key:
+            return self._refresh_emby(reason=reason, callback=callback)
+        if self._emby_url or self._emby_api_key:
+            result = {
+                "success": False,
+                "target": "emby",
+                "reason": reason,
+                "event": (callback or {}).get("event"),
+                "time": self._now(),
+                "message": "Emby 地址和 API Key 需要同时填写",
+            }
+            return self._save_mediaserver_refresh(result)
+        return self._refresh_moviepilot_mediaserver(reason=reason, callback=callback)
+
+    def _emby_endpoint(self, path: str) -> str:
+        endpoint = path
+        if self._emby_url.lower().endswith("/emby") and endpoint.startswith("/emby/"):
+            endpoint = endpoint[len("/emby"):]
+        return "%s%s" % (self._emby_url, endpoint)
+
+    def _refresh_emby(
+        self,
+        reason: str,
+        callback: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        event = (callback or {}).get("event")
+        result: Dict[str, Any] = {
+            "success": False,
+            "target": "emby",
+            "reason": reason,
+            "event": event,
+            "time": self._now(),
+        }
+
+        if self._refresh_delay > 0:
+            sleep(min(self._refresh_delay, 300))
+
+        try:
+            query = urlencode({"api_key": self._emby_api_key})
+            url = "%s?%s" % (self._emby_endpoint("/emby/Library/Refresh"), query)
+            request = Request(
+                url=url,
+                data=b"",
+                method="POST",
+                headers={
+                    "Accept": "application/json",
+                    "X-Emby-Token": self._emby_api_key,
+                },
+            )
+            with urlopen(request, timeout=30) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+                result.update(
+                    {
+                        "success": True,
+                        "status_code": resp.status,
+                        "body": body,
+                    }
+                )
+        except Exception as err:
+            result["message"] = self._error_message(err)
+
+        return self._save_mediaserver_refresh(result)
 
     def _refresh_moviepilot_mediaserver(
         self,
@@ -178,6 +265,7 @@ class Pan302Bridge(_PluginBase):
         event = (callback or {}).get("event")
         result: Dict[str, Any] = {
             "success": False,
+            "target": "moviepilot",
             "reason": reason,
             "event": event,
             "time": self._now(),
@@ -240,7 +328,8 @@ class Pan302Bridge(_PluginBase):
         refresh_result = data.get("mediaserver_refresh") or {}
         if refresh_result and not refresh_result.get("skipped"):
             refresh_state = "成功" if refresh_result.get("success") else "失败"
-            text = "%s\nMoviePilot 媒体服务器刷新：%s" % (text, refresh_state)
+            refresh_target = "Emby" if refresh_result.get("target") == "emby" else "MoviePilot 媒体服务器"
+            text = "%s\n%s 刷新：%s" % (text, refresh_target, refresh_state)
         try:
             self.post_message(title=title, text=text)
         except Exception as err:
@@ -280,6 +369,36 @@ class Pan302Bridge(_PluginBase):
                                     }
                                 ],
                             },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "emby_url",
+                                            "label": "Emby 地址（可选）",
+                                            "placeholder": "http://192.168.6.36:8096",
+                                            "clearable": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "emby_api_key",
+                                            "label": "Emby API Key（可选）",
+                                            "type": "password",
+                                            "clearable": True,
+                                        },
+                                    }
+                                ],
+                            },
                         ],
                     }
                 ],
@@ -287,6 +406,8 @@ class Pan302Bridge(_PluginBase):
         ], {
             "enabled": False,
             "notify_on_callback": True,
+            "emby_url": "",
+            "emby_api_key": "",
         }
 
     def get_page(self) -> List[dict]:
@@ -307,8 +428,8 @@ class Pan302Bridge(_PluginBase):
                                 "props": {
                                     "type": "info" if self._refresh_mediaserver else "warning",
                                     "variant": "tonal",
-                                    "text": "回调后刷新 MoviePilot 媒体服务器：%s"
-                                    % ("开启" if self._refresh_mediaserver else "关闭"),
+                                    "text": "刷新目标：%s"
+                                    % ("直连 Emby" if self._emby_url and self._emby_api_key else "MoviePilot 媒体服务器"),
                                 },
                             }
                         ],

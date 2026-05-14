@@ -1,13 +1,14 @@
 {
   "Pan302Bridge": {
     "name": "Pan302 联动",
-    "description": "接收 pan-302 回调，并调用 MoviePilot 已配置的媒体服务器刷新。",
+    "description": "接收 pan-302 回调，并刷新 Emby 或 MoviePilot 已配置的媒体服务器。",
     "labels": "网盘,STRM,MoviePilot,pan-302",
-    "version": "1.3.0",
+    "version": "1.4.0",
     "icon": "Moviepilot_A.png",
     "author": "czerov",
     "level": 1,
     "history": {
+      "v1.4.0": "新增可选 Emby 地址和 API Key，填写后直连 Emby 刷库；未填写时继续使用 MoviePilot 媒体服务器刷新。",
       "v1.3.0": "进一步精简配置页，仅保留启用和回调通知开关，默认在 pan-302 STRM 相关回调后刷新 MoviePilot 媒体服务器。",
       "v1.2.0": "精简插件配置，移除重复的 Emby 地址和 API Key，改为调用 MoviePilot 已配置的媒体服务器刷新能力。",
       "v1.1.0": "新增 pan-302 回调后自动刷新 Emby 媒体库，支持测试 Emby 连接、手动刷新和指定媒体库 ID。",
