@@ -11,12 +11,14 @@
 - 根据事件名触发 MoviePilot 已启用媒体服务器刷新。
 - 可选直连 Emby 刷新媒体库，避免同时刷新 MoviePilot 中配置的多个媒体服务器。
 - 可选发送 MoviePilot 通知。
+- 支持配置通知默认图片，避免通知卡片显示灰色占位。
 - 支持在插件详情页手动刷新媒体服务器。
 
 ## 配置
 
 - `启用 pan-302 联动`：是否启用插件。
 - `收到 pan-302 回调后发送 MoviePilot 通知`：启用后收到回调会发送通知。
+- `通知默认图片 URL`：当 pan-302 回调没有携带图片字段时，用该图片作为 MoviePilot 通知卡片图片。建议填写 JPG 或 PNG 图片链接，不建议使用 SVG。
 - `Emby 地址（可选）`：填写后插件会直连 Emby，例如 `http://192.168.6.36:8096`。
 - `Emby API Key（可选）`：Emby 后台生成的 API Key。
 
@@ -69,6 +71,7 @@ http://你的MoviePilot地址:3000/api/v1/plugin/Pan302Bridge/pan302_callback?ap
   "event": "strm_generated",
   "title": "pan-302 STRM 生成完成",
   "text": "资源已整理并生成 STRM",
+  "image": "https://example.com/pan302.png",
   "cloudPath": "/media/video/xxx.mkv",
   "localPath": "",
   "ruleName": "115",

@@ -22,7 +22,7 @@ class Pan302Bridge(_PluginBase):
     plugin_name = "Pan302 联动"
     plugin_desc = "接收 pan-302 回调，并刷新 Emby 或 MoviePilot 媒体服务器。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.4.0"
+    plugin_version = "1.4.1"
     plugin_author = "czerov"
     author_url = "https://github.com/czerov"
     plugin_config_prefix = "pan302bridge_"
@@ -34,6 +34,7 @@ class Pan302Bridge(_PluginBase):
     _refresh_events = "strm_generated,strm_sync_completed,share_transfer_completed,offline_move_completed"
     _refresh_delay = 0
     _notify_on_callback = True
+    _notify_image_url = ""
     _emby_url = ""
     _emby_api_key = ""
 
@@ -41,6 +42,7 @@ class Pan302Bridge(_PluginBase):
         config = config or {}
         self._enabled = bool(config.get("enabled"))
         self._notify_on_callback = bool(config.get("notify_on_callback", True))
+        self._notify_image_url = (config.get("notify_image_url") or "").strip()
         self._emby_url = self._normalize_base_url(config.get("emby_url"))
         self._emby_api_key = (config.get("emby_api_key") or "").strip()
 
@@ -127,6 +129,7 @@ class Pan302Bridge(_PluginBase):
             "refresh_mediaserver": self._refresh_mediaserver,
             "refresh_events": self._split_config_values(self._refresh_events),
             "notify_on_callback": self._notify_on_callback,
+            "notify_image_url": self._notify_image_url,
             "emby_url": self._emby_url,
             "has_emby_api_key": bool(self._emby_api_key),
             "last_callback": self.get_data("last_callback"),
@@ -325,13 +328,30 @@ class Pan302Bridge(_PluginBase):
     def _notify_callback(self, data: Dict[str, Any]):
         title = data.get("title") or "pan-302 任务通知"
         text = data.get("text") or data.get("event") or str(data)
+        image = (
+            data.get("image")
+            or data.get("image_url")
+            or data.get("poster")
+            or data.get("poster_url")
+            or self._notify_image_url
+        )
         refresh_result = data.get("mediaserver_refresh") or {}
         if refresh_result and not refresh_result.get("skipped"):
             refresh_state = "成功" if refresh_result.get("success") else "失败"
             refresh_target = "Emby" if refresh_result.get("target") == "emby" else "MoviePilot 媒体服务器"
             text = "%s\n%s 刷新：%s" % (text, refresh_target, refresh_state)
         try:
-            self.post_message(title=title, text=text)
+            if image:
+                try:
+                    self.post_message(title=title, text=text, image=image)
+                except TypeError as err:
+                    self._log_warning(
+                        "当前 MoviePilot 版本不支持通知图片参数，已回退为纯文本通知：%s"
+                        % self._error_message(err)
+                    )
+                    self.post_message(title=title, text=text)
+            else:
+                self.post_message(title=title, text=text)
         except Exception as err:
             self._log_warning("pan-302 回调通知发送失败：%s" % self._error_message(err))
 
@@ -352,6 +372,23 @@ class Pan302Bridge(_PluginBase):
                                         "props": {
                                             "model": "enabled",
                                             "label": "启用 pan-302 联动",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "notify_image_url",
+                                            "label": "通知默认图片 URL",
+                                            "placeholder": "当 Pan302 回调没有携带 image 时，使用该图片作为 MoviePilot 通知卡片图片",
+                                            "rows": 2,
+                                            "auto-grow": True,
+                                            "clearable": True,
                                         },
                                     }
                                 ],
@@ -406,6 +443,7 @@ class Pan302Bridge(_PluginBase):
         ], {
             "enabled": False,
             "notify_on_callback": True,
+            "notify_image_url": "",
             "emby_url": "",
             "emby_api_key": "",
         }
