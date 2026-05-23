@@ -22,7 +22,7 @@ class Pan302Bridge(_PluginBase):
     plugin_name = "Pan302 联动"
     plugin_desc = "接收 pan-302 回调，并刷新 Emby 或 MoviePilot 媒体服务器。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.4.1"
+    plugin_version = "1.4.2"
     plugin_author = "czerov"
     author_url = "https://github.com/czerov"
     plugin_config_prefix = "pan302bridge_"
@@ -45,6 +45,7 @@ class Pan302Bridge(_PluginBase):
         self._notify_image_url = (config.get("notify_image_url") or "").strip()
         self._emby_url = self._normalize_base_url(config.get("emby_url"))
         self._emby_api_key = (config.get("emby_api_key") or "").strip()
+        self._log_info("Pan302Bridge 插件初始化完成")
 
     @staticmethod
     def _now() -> str:
@@ -83,6 +84,10 @@ class Pan302Bridge(_PluginBase):
     def _log_warning(self, message: str):
         if logger:
             logger.warning(message)
+
+    def _log_info(self, message: str):
+        if logger:
+            logger.info(message)
 
     def _save_action(self, action: str, success: bool, data: Optional[dict] = None):
         payload = {
@@ -138,6 +143,7 @@ class Pan302Bridge(_PluginBase):
         }
 
     def api_refresh_mediaserver(self, data: Optional[dict] = None) -> Dict[str, Any]:
+        self._log_info("收到手动刷新媒体服务器请求")
         result = self._refresh_preferred_mediaserver(reason="manual", callback=data or {})
         self._save_action("refresh_mediaserver", bool(result.get("success")), result)
         return result
@@ -147,6 +153,7 @@ class Pan302Bridge(_PluginBase):
         callback = dict(data)
         callback["success"] = True
         callback.setdefault("time", self._now())
+        self._log_info("收到 pan-302 回调：event=%s" % (callback.get("event") or ""))
 
         refresh_result = self._refresh_from_callback(callback)
         callback["mediaserver_refresh"] = refresh_result
