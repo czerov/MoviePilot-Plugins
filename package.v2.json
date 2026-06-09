@@ -1,13 +1,14 @@
 {
   "Pan302Bridge": {
     "name": "Pan302 联动",
-    "description": "接收 pan-302 回调，并刷新 Emby 或 MoviePilot 已配置的媒体服务器。",
+    "description": "联动 MoviePilot 与 pan302，支持整理完成上传、分享转存回调和媒体库刷新。",
     "labels": "网盘,STRM,MoviePilot,pan-302",
-    "version": "1.4.2",
+    "version": "1.5.0",
     "icon": "Moviepilot_A.png",
     "author": "czerov",
     "level": 1,
     "history": {
+      "v1.5.0": "新增 MoviePilot 整理完成后调用 pan302 upload-by-path，并支持通过用户消息提交 115 分享链接给 pan302 转存。",
       "v1.4.2": "初始化和收到回调时写入插件运行日志，避免日志文件未生成导致运行日志页面 404。",
       "v1.4.1": "新增通知默认图片 URL 配置，pan-302 回调未携带图片时用于 MoviePilot 通知卡片展示。",
       "v1.4.0": "新增可选 Emby 地址和 API Key，填写后直连 Emby 刷库；未填写时继续使用 MoviePilot 媒体服务器刷新。",

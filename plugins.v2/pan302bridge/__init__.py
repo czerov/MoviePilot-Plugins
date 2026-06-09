@@ -1,4 +1,7 @@
+import json
+import re
 from datetime import datetime
+from pathlib import Path
 from time import sleep
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import HTTPError
@@ -6,6 +9,14 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from app.plugins import _PluginBase
+
+try:
+    from app.core.event import Event, eventmanager
+    from app.schemas.types import EventType
+except Exception:  # pragma: no cover - MoviePilot runtime provides event modules.
+    Event = None
+    EventType = None
+    eventmanager = None
 
 try:
     from app.core.module import ModuleManager
@@ -18,11 +29,17 @@ except Exception:  # pragma: no cover - MoviePilot runtime provides app.log.
     logger = None
 
 
+def _event_register(event_type):
+    if eventmanager and event_type:
+        return eventmanager.register(event_type)
+    return lambda func: func
+
+
 class Pan302Bridge(_PluginBase):
     plugin_name = "Pan302 联动"
-    plugin_desc = "接收 pan-302 回调，并刷新 Emby 或 MoviePilot 媒体服务器。"
+    plugin_desc = "联动 MoviePilot 与 pan302，支持整理完成上传、分享转存回调和媒体库刷新。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.4.2"
+    plugin_version = "1.5.0"
     plugin_author = "czerov"
     author_url = "https://github.com/czerov"
     plugin_config_prefix = "pan302bridge_"
@@ -30,6 +47,10 @@ class Pan302Bridge(_PluginBase):
     auth_level = 1
 
     _enabled = False
+    _pan302_url = ""
+    _pan302_token = ""
+    _include_dirs = ""
+    _transfer_folder = ""
     _refresh_mediaserver = True
     _refresh_events = "strm_generated,strm_sync_completed,share_transfer_completed,offline_move_completed"
     _refresh_delay = 0
@@ -41,6 +62,10 @@ class Pan302Bridge(_PluginBase):
     def init_plugin(self, config: Optional[dict] = None):
         config = config or {}
         self._enabled = bool(config.get("enabled"))
+        self._pan302_url = self._normalize_base_url(config.get("pan302_url") or config.get("pan302_host"))
+        self._pan302_token = (config.get("pan302_token") or "").strip()
+        self._include_dirs = (config.get("include_dirs") or "").strip()
+        self._transfer_folder = (config.get("transfer_folder") or "").strip()
         self._notify_on_callback = bool(config.get("notify_on_callback", True))
         self._notify_image_url = (config.get("notify_image_url") or "").strip()
         self._emby_url = self._normalize_base_url(config.get("emby_url"))
@@ -89,6 +114,61 @@ class Pan302Bridge(_PluginBase):
         if logger:
             logger.info(message)
 
+    def _pan302_headers(self, auth_mode: str = "bearer") -> Dict[str, str]:
+        headers = {"Accept": "application/json"}
+        if self._pan302_token:
+            if auth_mode == "raw":
+                headers["Authorization"] = self._pan302_token
+            else:
+                headers["Authorization"] = "Bearer %s" % self._pan302_token
+        return headers
+
+    def _pan302_endpoint(self, path: str) -> str:
+        if not self._pan302_url:
+            raise ValueError("pan302 地址未配置")
+        if path.startswith("/"):
+            return "%s%s" % (self._pan302_url, path)
+        return "%s/%s" % (self._pan302_url, path)
+
+    def _pan302_get(
+        self,
+        path: str,
+        params: Optional[dict] = None,
+        timeout: int = 30,
+        auth_mode: str = "bearer",
+    ) -> Any:
+        if not self._pan302_token:
+            raise ValueError("pan302 Token 未配置")
+
+        try:
+            return self._pan302_get_once(path, params=params, timeout=timeout, auth_mode=auth_mode)
+        except HTTPError as err:
+            if err.code not in (401, 403):
+                raise
+            fallback_mode = "raw" if auth_mode == "bearer" else "bearer"
+            return self._pan302_get_once(path, params=params, timeout=timeout, auth_mode=fallback_mode)
+
+    def _pan302_get_once(
+        self,
+        path: str,
+        params: Optional[dict] = None,
+        timeout: int = 30,
+        auth_mode: str = "bearer",
+    ) -> Any:
+        query = urlencode(params or {})
+        url = self._pan302_endpoint(path)
+        if query:
+            url = "%s?%s" % (url, query)
+        request = Request(url=url, method="GET", headers=self._pan302_headers(auth_mode=auth_mode))
+        with urlopen(request, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            if not body:
+                return {"status_code": resp.status}
+            try:
+                return json.loads(body)
+            except ValueError:
+                return {"status_code": resp.status, "body": body}
+
     def _save_action(self, action: str, success: bool, data: Optional[dict] = None):
         payload = {
             "action": action,
@@ -133,11 +213,17 @@ class Pan302Bridge(_PluginBase):
             "enabled": self._enabled,
             "refresh_mediaserver": self._refresh_mediaserver,
             "refresh_events": self._split_config_values(self._refresh_events),
+            "pan302_url": self._pan302_url,
+            "has_pan302_token": bool(self._pan302_token),
+            "include_dirs": self._split_config_values(self._include_dirs),
+            "transfer_folder": self._transfer_folder,
             "notify_on_callback": self._notify_on_callback,
             "notify_image_url": self._notify_image_url,
             "emby_url": self._emby_url,
             "has_emby_api_key": bool(self._emby_api_key),
             "last_callback": self.get_data("last_callback"),
+            "last_pan302_upload": self.get_data("last_pan302_upload"),
+            "last_pan302_share": self.get_data("last_pan302_share"),
             "last_mediaserver_refresh": self.get_data("last_mediaserver_refresh"),
             "last_action": self.get_data("last_action"),
         }
@@ -166,6 +252,132 @@ class Pan302Bridge(_PluginBase):
             "success": True,
             "mediaserver_refresh": refresh_result,
         }
+
+    @_event_register(EventType.TransferComplete if EventType else None)
+    def evt_transfer_complete(self, event: Event):
+        if not self._enabled or not event or not getattr(event, "event_data", None):
+            return
+
+        transferinfo = event.event_data.get("transferinfo")
+        if not transferinfo or not getattr(transferinfo, "success", False):
+            return
+
+        target_item = getattr(transferinfo, "target_item", None)
+        if not target_item:
+            return
+
+        storage = str(getattr(target_item, "storage", "") or "").lower()
+        item_type = str(getattr(target_item, "type", "") or "").lower()
+        target_path = str(getattr(target_item, "path", "") or "").strip()
+
+        if storage and "local" not in storage:
+            return
+        if item_type and "file" not in item_type:
+            return
+        if not target_path:
+            return
+        if not self._path_in_include_dirs(target_path):
+            self._log_info("整理完成路径不在 pan302 包含目录中，跳过：%s" % target_path)
+            return
+
+        self._log_info("MoviePilot 整理完成，通知 pan302 上传：%s" % target_path)
+        result = self._trigger_pan302_upload_by_path(target_path)
+        self._save_action("pan302_upload_by_path", bool(result.get("success")), result)
+
+    @_event_register(EventType.UserMessage if EventType else None)
+    def evt_user_message(self, event: Event):
+        if not self._enabled or not event or not getattr(event, "event_data", None):
+            return
+
+        message = (event.event_data.get("text") or event.event_data.get("message") or "").strip()
+        if not message:
+            return
+        if message.startswith("#"):
+            message = message[1:].strip()
+        if not message.startswith("http") or not self._parse_115_share_url(message):
+            return
+
+        if not self._transfer_folder:
+            self._log_warning("收到 115 分享链接，但未配置 pan302 分享转存目录")
+            return
+
+        self._log_info("收到 115 分享链接，通知 pan302 转存：%s" % message)
+        result = self._submit_pan302_share(message)
+        self._save_action("pan302_share_save", bool(result.get("success")), result)
+
+    def _path_in_include_dirs(self, target_path: str) -> bool:
+        include_dirs = self._split_config_values(self._include_dirs)
+        if not include_dirs:
+            return True
+        normalized_target = target_path.replace("\\", "/")
+        for include_dir in include_dirs:
+            normalized_include = include_dir.replace("\\", "/").rstrip("/")
+            if normalized_include and normalized_target.startswith(normalized_include):
+                return True
+        return False
+
+    @staticmethod
+    def _parse_115_share_url(share_url: str) -> Optional[Tuple[str, Optional[str]]]:
+        pattern = re.compile(r"(?:115|anxia|115cdn)\.com/s/([^?&#]+)(?:\?password=([^&#]+))?")
+        matches = pattern.search(share_url)
+        if not matches:
+            return None
+        return matches.groups()
+
+    def _trigger_pan302_upload_by_path(self, target_path: str) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "success": False,
+            "target": "pan302",
+            "action": "upload_by_path",
+            "path": target_path,
+            "time": self._now(),
+        }
+        try:
+            if not Path(target_path).exists():
+                self._log_warning("整理完成文件在 MoviePilot 宿主内不存在，仍尝试通知 pan302：%s" % target_path)
+            response = self._pan302_get(
+                "/api/sync/upload-by-path",
+                params={"path": target_path},
+                timeout=30,
+                auth_mode="bearer",
+            )
+            result.update({"success": True, "result": response})
+        except Exception as err:
+            result["message"] = self._error_message(err)
+
+        self.save_data("last_pan302_upload", result)
+        if result.get("success"):
+            self._log_info("pan302 upload-by-path 调用成功：%s" % target_path)
+        else:
+            self._log_warning("pan302 upload-by-path 调用失败：%s" % result.get("message"))
+        return result
+
+    def _submit_pan302_share(self, share_url: str) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "success": False,
+            "target": "pan302",
+            "action": "save_share",
+            "url": share_url,
+            "folder": self._transfer_folder,
+            "time": self._now(),
+        }
+        try:
+            response = self._pan302_get(
+                "/strm/api/task/save-share",
+                params={"url": share_url, "folder": self._transfer_folder},
+                timeout=30,
+                auth_mode="raw",
+            )
+            result.update({"success": True, "result": response})
+        except Exception as err:
+            result["message"] = self._error_message(err)
+
+        self.save_data("last_pan302_share", result)
+        if result.get("success"):
+            self._log_info("pan302 分享转存调用成功：%s" % share_url)
+        else:
+            self._log_warning("pan302 分享转存调用失败：%s" % result.get("message"))
+        return result
 
     def _refresh_from_callback(self, callback: Dict[str, Any]) -> Dict[str, Any]:
         event = (callback.get("event") or "").strip()
@@ -385,6 +597,68 @@ class Pan302Bridge(_PluginBase):
                             },
                             {
                                 "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "pan302_url",
+                                            "label": "pan302 地址",
+                                            "placeholder": "http://192.168.6.36:3000",
+                                            "clearable": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "pan302_token",
+                                            "label": "pan302 Token",
+                                            "type": "password",
+                                            "clearable": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "transfer_folder",
+                                            "label": "115 分享转存目录",
+                                            "placeholder": "/转存监控",
+                                            "clearable": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "include_dirs",
+                                            "label": "整理完成包含目录",
+                                            "placeholder": "留空则不限制；多目录可换行或逗号分隔",
+                                            "rows": 2,
+                                            "auto-grow": True,
+                                            "clearable": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
                                 "props": {"cols": 12},
                                 "content": [
                                     {
@@ -449,6 +723,10 @@ class Pan302Bridge(_PluginBase):
             }
         ], {
             "enabled": False,
+            "pan302_url": "",
+            "pan302_token": "",
+            "include_dirs": "",
+            "transfer_folder": "",
             "notify_on_callback": True,
             "notify_image_url": "",
             "emby_url": "",
@@ -457,6 +735,8 @@ class Pan302Bridge(_PluginBase):
 
     def get_page(self) -> List[dict]:
         last_callback = self.get_data("last_callback") or {}
+        last_upload = self.get_data("last_pan302_upload") or {}
+        last_share = self.get_data("last_pan302_share") or {}
         last_refresh = self.get_data("last_mediaserver_refresh") or {}
         last_action = self.get_data("last_action") or {}
 
@@ -498,6 +778,24 @@ class Pan302Bridge(_PluginBase):
                     },
                     {
                         "component": "VCol",
+                        "props": {"cols": 12},
+                        "content": [
+                            {
+                                "component": "VAlert",
+                                "props": {
+                                    "type": "info" if self._pan302_url and self._pan302_token else "warning",
+                                    "variant": "tonal",
+                                    "text": "pan302 主动联动：%s；包含目录：%s"
+                                    % (
+                                        "已配置" if self._pan302_url and self._pan302_token else "未完整配置",
+                                        self._compact(self._split_config_values(self._include_dirs)),
+                                    ),
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VCol",
                         "props": {"cols": 12, "md": 4},
                         "content": [
                             {
@@ -534,6 +832,34 @@ class Pan302Bridge(_PluginBase):
                                     "type": "secondary",
                                     "variant": "tonal",
                                     "text": "最近动作：%s" % self._compact(last_action),
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VCol",
+                        "props": {"cols": 12, "md": 6},
+                        "content": [
+                            {
+                                "component": "VAlert",
+                                "props": {
+                                    "type": "info",
+                                    "variant": "tonal",
+                                    "text": "最近 pan302 上传：%s" % self._compact(last_upload),
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VCol",
+                        "props": {"cols": 12, "md": 6},
+                        "content": [
+                            {
+                                "component": "VAlert",
+                                "props": {
+                                    "type": "info",
+                                    "variant": "tonal",
+                                    "text": "最近 pan302 分享转存：%s" % self._compact(last_share),
                                 },
                             }
                         ],
