@@ -5,7 +5,7 @@ from pathlib import Path
 from time import sleep
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from app.plugins import _PluginBase
@@ -39,7 +39,7 @@ class Pan302Bridge(_PluginBase):
     plugin_name = "Pan302 联动"
     plugin_desc = "联动 MoviePilot 与 pan302，支持整理完成上传、分享转存回调和媒体库刷新。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.5.0"
+    plugin_version = "1.6.0"
     plugin_author = "czerov"
     author_url = "https://github.com/czerov"
     plugin_config_prefix = "pan302bridge_"
@@ -114,8 +114,10 @@ class Pan302Bridge(_PluginBase):
         if logger:
             logger.info(message)
 
-    def _pan302_headers(self, auth_mode: str = "bearer") -> Dict[str, str]:
+    def _pan302_headers(self, auth_mode: str = "bearer", json_body: bool = False) -> Dict[str, str]:
         headers = {"Accept": "application/json"}
+        if json_body:
+            headers["Content-Type"] = "application/json"
         if self._pan302_token:
             if auth_mode == "raw":
                 headers["Authorization"] = self._pan302_token
@@ -129,6 +131,16 @@ class Pan302Bridge(_PluginBase):
         if path.startswith("/"):
             return "%s%s" % (self._pan302_url, path)
         return "%s/%s" % (self._pan302_url, path)
+
+    @staticmethod
+    def _decode_http_response(resp) -> Any:
+        body = resp.read().decode("utf-8", errors="replace")
+        if not body:
+            return {"status_code": resp.status}
+        try:
+            return json.loads(body)
+        except ValueError:
+            return {"status_code": resp.status, "body": body}
 
     def _pan302_get(
         self,
@@ -161,13 +173,48 @@ class Pan302Bridge(_PluginBase):
             url = "%s?%s" % (url, query)
         request = Request(url=url, method="GET", headers=self._pan302_headers(auth_mode=auth_mode))
         with urlopen(request, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-            if not body:
-                return {"status_code": resp.status}
-            try:
-                return json.loads(body)
-            except ValueError:
-                return {"status_code": resp.status, "body": body}
+            return self._decode_http_response(resp)
+
+    def _pan302_post(
+        self,
+        path: str,
+        payload: Optional[dict] = None,
+        params: Optional[dict] = None,
+        timeout: int = 30,
+        auth_mode: str = "bearer",
+    ) -> Any:
+        if not self._pan302_token:
+            raise ValueError("pan302 Token 未配置")
+
+        try:
+            return self._pan302_post_once(path, payload=payload, params=params, timeout=timeout, auth_mode=auth_mode)
+        except HTTPError as err:
+            if err.code not in (401, 403):
+                raise
+            fallback_mode = "raw" if auth_mode == "bearer" else "bearer"
+            return self._pan302_post_once(path, payload=payload, params=params, timeout=timeout, auth_mode=fallback_mode)
+
+    def _pan302_post_once(
+        self,
+        path: str,
+        payload: Optional[dict] = None,
+        params: Optional[dict] = None,
+        timeout: int = 30,
+        auth_mode: str = "bearer",
+    ) -> Any:
+        query = urlencode(params or {})
+        url = self._pan302_endpoint(path)
+        if query:
+            url = "%s?%s" % (url, query)
+        data = json.dumps(payload or {}, ensure_ascii=False).encode("utf-8")
+        request = Request(
+            url=url,
+            data=data,
+            method="POST",
+            headers=self._pan302_headers(auth_mode=auth_mode, json_body=True),
+        )
+        with urlopen(request, timeout=timeout) as resp:
+            return self._decode_http_response(resp)
 
     def _save_action(self, action: str, success: bool, data: Optional[dict] = None):
         payload = {
@@ -205,6 +252,41 @@ class Pan302Bridge(_PluginBase):
                 "auth": "apikey",
                 "summary": "接收 pan-302 回调",
             },
+            {
+                "path": "/shortcut/status",
+                "endpoint": self.api_shortcut_status,
+                "methods": ["GET"],
+                "auth": "apikey",
+                "summary": "快捷指令查询 Pan302 状态",
+            },
+            {
+                "path": "/shortcut/share",
+                "endpoint": self.api_shortcut_share,
+                "methods": ["GET"],
+                "auth": "apikey",
+                "summary": "快捷指令提交 115 分享转存",
+            },
+            {
+                "path": "/shortcut/strm-sync",
+                "endpoint": self.api_shortcut_strm_sync,
+                "methods": ["GET"],
+                "auth": "apikey",
+                "summary": "快捷指令触发 STRM 同步",
+            },
+            {
+                "path": "/shortcut/upload-sync",
+                "endpoint": self.api_shortcut_upload_sync,
+                "methods": ["GET"],
+                "auth": "apikey",
+                "summary": "快捷指令触发上传同步",
+            },
+            {
+                "path": "/shortcut/rule-trigger",
+                "endpoint": self.api_shortcut_rule_trigger,
+                "methods": ["GET"],
+                "auth": "apikey",
+                "summary": "快捷指令触发转移规则",
+            },
         ]
 
     def api_status(self) -> Dict[str, Any]:
@@ -224,6 +306,7 @@ class Pan302Bridge(_PluginBase):
             "last_callback": self.get_data("last_callback"),
             "last_pan302_upload": self.get_data("last_pan302_upload"),
             "last_pan302_share": self.get_data("last_pan302_share"),
+            "last_shortcut_action": self.get_data("last_shortcut_action"),
             "last_mediaserver_refresh": self.get_data("last_mediaserver_refresh"),
             "last_action": self.get_data("last_action"),
         }
@@ -252,6 +335,126 @@ class Pan302Bridge(_PluginBase):
             "success": True,
             "mediaserver_refresh": refresh_result,
         }
+
+    def api_shortcut_status(self) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "success": True,
+            "action": "shortcut_status",
+            "target": "pan302",
+            "time": self._now(),
+            "checks": {},
+        }
+        for name, endpoint in (
+            ("health", "/api/health"),
+            ("transfer", "/api/transfer/status"),
+            ("strm", "/api/strm/status"),
+        ):
+            try:
+                result["checks"][name] = self._pan302_get(endpoint, timeout=15)
+            except Exception as err:
+                result["success"] = False
+                result["checks"][name] = {
+                    "success": False,
+                    "message": self._error_message(err),
+                }
+        return self._save_shortcut_action(result)
+
+    def api_shortcut_share(
+        self,
+        url: str = "",
+        shareUrl: str = "",
+        share_url: str = "",
+        folder: str = "",
+        dstId: str = "",
+        dst_id: str = "",
+        dst: str = "",
+        driverType: str = "",
+        driver_type: str = "",
+        driver: str = "",
+        receiveCode: str = "",
+        receive_code: str = "",
+        code: str = "",
+        password: str = "",
+    ) -> Dict[str, Any]:
+        share_url = (url or shareUrl or share_url or "").strip()
+        dst_id = (dstId or dst_id or dst or folder or self._transfer_folder or "").strip()
+        receive_code = (receiveCode or receive_code or code or password or "").strip()
+        driver_type = self._shortcut_driver_type(driverType, driver_type, driver)
+
+        result: Dict[str, Any] = {
+            "success": False,
+            "action": "shortcut_share",
+            "target": "pan302",
+            "url": share_url,
+            "dstId": dst_id,
+            "driverType": driver_type,
+            "time": self._now(),
+        }
+        if not share_url:
+            result["message"] = "缺少 115 分享链接"
+            return self._save_shortcut_action(result)
+
+        parsed = self._parse_115_share_url(share_url)
+        if not parsed:
+            result["message"] = "不是有效的 115 分享链接"
+            return self._save_shortcut_action(result)
+        if not receive_code and parsed[1]:
+            receive_code = parsed[1]
+
+        if not dst_id:
+            result["message"] = "缺少转存目录，请在插件配置 115 分享转存目录，或传入 folder/dstId"
+            return self._save_shortcut_action(result)
+
+        payload = {
+            "shareUrl": share_url,
+            "receiveCode": receive_code,
+            "dstId": dst_id,
+            "driverType": driver_type,
+        }
+        try:
+            response = self._pan302_post("/api/transfer/share-receive", payload=payload, timeout=30)
+            result.update({"success": True, "result": response})
+            self.save_data("last_pan302_share", result)
+            self._log_info("快捷指令提交 pan302 分享转存成功：%s" % share_url)
+        except Exception as err:
+            result["message"] = self._error_message(err)
+            self._log_warning("快捷指令提交 pan302 分享转存失败：%s" % result["message"])
+        return self._save_shortcut_action(result)
+
+    def api_shortcut_strm_sync(self, name: str = "") -> Dict[str, Any]:
+        task_name = (name or "").strip()
+        path = "/api/strm/sync/%s" % quote(task_name, safe="") if task_name else "/api/strm/sync"
+        return self._shortcut_pan302_post("shortcut_strm_sync", path, {"name": task_name})
+
+    def api_shortcut_upload_sync(self, name: str = "") -> Dict[str, Any]:
+        task_name = (name or "").strip()
+        if not task_name:
+            return self._save_shortcut_action(
+                {
+                    "success": False,
+                    "action": "shortcut_upload_sync",
+                    "target": "pan302",
+                    "time": self._now(),
+                    "message": "缺少上传同步配置名称 name",
+                }
+            )
+        path = "/api/transfer/sync/upload/%s" % quote(task_name, safe="")
+        return self._shortcut_pan302_post("shortcut_upload_sync", path, {"name": task_name})
+
+    def api_shortcut_rule_trigger(self, name: str = "") -> Dict[str, Any]:
+        rule_name = (name or "").strip()
+        if not rule_name:
+            return self._save_shortcut_action(
+                {
+                    "success": False,
+                    "action": "shortcut_rule_trigger",
+                    "target": "pan302",
+                    "time": self._now(),
+                    "message": "缺少转移规则名称 name",
+                }
+            )
+        path = "/api/transfer/rules/trigger/%s" % quote(rule_name, safe="")
+        return self._shortcut_pan302_post("shortcut_rule_trigger", path, {"name": rule_name})
 
     @_event_register(EventType.TransferComplete if EventType else None)
     def evt_transfer_complete(self, event: Event):
@@ -323,6 +526,45 @@ class Pan302Bridge(_PluginBase):
         if not matches:
             return None
         return matches.groups()
+
+    @staticmethod
+    def _shortcut_driver_type(*values: str) -> str:
+        for value in values:
+            normalized = (value or "").strip()
+            if normalized:
+                return normalized
+        return "115"
+
+    def _save_shortcut_action(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        result.setdefault("time", self._now())
+        self.save_data("last_shortcut_action", result)
+        self._save_action(result.get("action") or "shortcut", bool(result.get("success")), result)
+        return result
+
+    def _shortcut_pan302_post(
+        self,
+        action: str,
+        path: str,
+        meta: Optional[dict] = None,
+        payload: Optional[dict] = None,
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "success": False,
+            "action": action,
+            "target": "pan302",
+            "path": path,
+            "time": self._now(),
+        }
+        if meta:
+            result.update(meta)
+        try:
+            response = self._pan302_post(path, payload=payload or {}, timeout=30)
+            result.update({"success": True, "result": response})
+            self._log_info("快捷指令调用 pan302 成功：%s" % action)
+        except Exception as err:
+            result["message"] = self._error_message(err)
+            self._log_warning("快捷指令调用 pan302 失败：%s，%s" % (action, result["message"]))
+        return self._save_shortcut_action(result)
 
     def _trigger_pan302_upload_by_path(self, target_path: str) -> Dict[str, Any]:
         result: Dict[str, Any] = {
@@ -737,6 +979,7 @@ class Pan302Bridge(_PluginBase):
         last_callback = self.get_data("last_callback") or {}
         last_upload = self.get_data("last_pan302_upload") or {}
         last_share = self.get_data("last_pan302_share") or {}
+        last_shortcut = self.get_data("last_shortcut_action") or {}
         last_refresh = self.get_data("last_mediaserver_refresh") or {}
         last_action = self.get_data("last_action") or {}
 
@@ -838,7 +1081,7 @@ class Pan302Bridge(_PluginBase):
                     },
                     {
                         "component": "VCol",
-                        "props": {"cols": 12, "md": 6},
+                        "props": {"cols": 12, "md": 4},
                         "content": [
                             {
                                 "component": "VAlert",
@@ -852,7 +1095,7 @@ class Pan302Bridge(_PluginBase):
                     },
                     {
                         "component": "VCol",
-                        "props": {"cols": 12, "md": 6},
+                        "props": {"cols": 12, "md": 4},
                         "content": [
                             {
                                 "component": "VAlert",
@@ -860,6 +1103,20 @@ class Pan302Bridge(_PluginBase):
                                     "type": "info",
                                     "variant": "tonal",
                                     "text": "最近 pan302 分享转存：%s" % self._compact(last_share),
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VCol",
+                        "props": {"cols": 12, "md": 4},
+                        "content": [
+                            {
+                                "component": "VAlert",
+                                "props": {
+                                    "type": "secondary",
+                                    "variant": "tonal",
+                                    "text": "最近快捷指令：%s" % self._compact(last_shortcut),
                                 },
                             }
                         ],

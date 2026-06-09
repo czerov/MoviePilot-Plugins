@@ -20,6 +20,7 @@
 - 可选发送 MoviePilot 通知。
 - 支持配置通知默认图片，避免通知卡片显示灰色占位。
 - 支持在插件详情页手动刷新媒体服务器。
+- 支持 iOS 快捷指令通过 MoviePilot API 触发 Pan302 状态查询、115 分享转存、STRM 同步、上传同步和转移规则。
 - 插件初始化和收到回调时会写入运行日志。
 
 ## 配置
@@ -60,6 +61,11 @@ MoviePilot 会将插件 API 注册到：
 GET  /status
 POST /refresh_mediaserver
 POST /pan302_callback
+GET  /shortcut/status
+GET  /shortcut/share
+GET  /shortcut/strm-sync
+GET  /shortcut/upload-sync
+GET  /shortcut/rule-trigger
 ```
 
 MoviePilot 主动调用 pan302 时会使用：
@@ -67,6 +73,14 @@ MoviePilot 主动调用 pan302 时会使用：
 ```text
 GET /api/sync/upload-by-path?path=<整理完成路径>
 GET /strm/api/task/save-share?url=<115分享链接>&folder=<115分享转存目录>
+POST /api/transfer/share-receive
+POST /api/strm/sync
+POST /api/strm/sync/:name
+POST /api/transfer/sync/upload/:name
+POST /api/transfer/rules/trigger/:name
+GET /api/health
+GET /api/transfer/status
+GET /api/strm/status
 ```
 
 直连 Emby 时，插件会调用：
@@ -82,6 +96,42 @@ pan-302 系统设置中的回调 URL 填：
 ```text
 http://你的MoviePilot地址:3000/api/v1/plugin/Pan302Bridge/pan302_callback?apikey=你的MoviePilot_API_TOKEN
 ```
+
+## iOS 快捷指令
+
+快捷指令只需要调用 MoviePilot 插件 API，不需要把 pan302 Token 放到手机快捷指令里。
+
+基础格式：
+
+```text
+http://你的MoviePilot地址:3000/api/v1/plugin/Pan302Bridge/<接口>?apikey=你的MoviePilot_API_TOKEN
+```
+
+可用接口：
+
+```text
+GET /shortcut/status
+GET /shortcut/share?url=<115分享链接>
+GET /shortcut/share?url=<115分享链接>&folder=<转存目录>&driverType=115
+GET /shortcut/strm-sync
+GET /shortcut/strm-sync?name=<STRM任务名>
+GET /shortcut/upload-sync?name=<上传同步配置名>
+GET /shortcut/rule-trigger?name=<转移规则名>
+```
+
+`/shortcut/share` 的转存目录优先级：
+
+```text
+dstId > dst_id > dst > folder > 插件配置里的 115 分享转存目录
+```
+
+分享提取码参数支持：
+
+```text
+receiveCode、receive_code、code、password
+```
+
+如果 115 分享链接里已经带 `password=xxxx`，插件会自动提取。
 
 ## 回调示例
 
