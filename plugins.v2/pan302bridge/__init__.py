@@ -39,7 +39,7 @@ class Pan302Bridge(_PluginBase):
     plugin_name = "Pan302 联动"
     plugin_desc = "联动 MoviePilot 与 pan302，支持整理完成上传、分享转存回调和媒体库刷新。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.6.0"
+    plugin_version = "1.6.1"
     plugin_author = "czerov"
     author_url = "https://github.com/czerov"
     plugin_config_prefix = "pan302bridge_"
@@ -49,6 +49,7 @@ class Pan302Bridge(_PluginBase):
     _enabled = False
     _pan302_url = ""
     _pan302_token = ""
+    _pan302_upload_sync_names = ""
     _include_dirs = ""
     _transfer_folder = ""
     _refresh_mediaserver = True
@@ -64,6 +65,7 @@ class Pan302Bridge(_PluginBase):
         self._enabled = bool(config.get("enabled"))
         self._pan302_url = self._normalize_base_url(config.get("pan302_url") or config.get("pan302_host"))
         self._pan302_token = (config.get("pan302_token") or "").strip()
+        self._pan302_upload_sync_names = (config.get("pan302_upload_sync_names") or "").strip()
         self._include_dirs = (config.get("include_dirs") or "").strip()
         self._transfer_folder = (config.get("transfer_folder") or "").strip()
         self._notify_on_callback = bool(config.get("notify_on_callback", True))
@@ -84,8 +86,27 @@ class Pan302Bridge(_PluginBase):
     def _split_config_values(value: str) -> List[str]:
         if not value:
             return []
-        normalized = str(value).replace("\n", ",").replace(";", ",")
+        normalized = str(value).replace("\n", ",").replace(";", ",").replace("，", ",")
         return [item.strip() for item in normalized.split(",") if item.strip()]
+
+    @staticmethod
+    def _normalize_compare_path(path: str) -> str:
+        normalized = str(path or "").strip().replace("\\", "/")
+        while "//" in normalized:
+            normalized = normalized.replace("//", "/")
+        if normalized == "/":
+            return normalized
+        return normalized.rstrip("/")
+
+    @classmethod
+    def _is_path_under(cls, target_path: str, base_path: str) -> bool:
+        target = cls._normalize_compare_path(target_path)
+        base = cls._normalize_compare_path(base_path)
+        if not target or not base:
+            return False
+        if base == "/":
+            return target.startswith("/")
+        return target == base or target.startswith("%s/" % base)
 
     @staticmethod
     def _compact(value: Any) -> str:
@@ -297,6 +318,7 @@ class Pan302Bridge(_PluginBase):
             "refresh_events": self._split_config_values(self._refresh_events),
             "pan302_url": self._pan302_url,
             "has_pan302_token": bool(self._pan302_token),
+            "pan302_upload_sync_names": self._split_config_values(self._pan302_upload_sync_names),
             "include_dirs": self._split_config_values(self._include_dirs),
             "transfer_folder": self._transfer_folder,
             "notify_on_callback": self._notify_on_callback,
@@ -484,8 +506,8 @@ class Pan302Bridge(_PluginBase):
             return
 
         self._log_info("MoviePilot 整理完成，通知 pan302 上传：%s" % target_path)
-        result = self._trigger_pan302_upload_by_path(target_path)
-        self._save_action("pan302_upload_by_path", bool(result.get("success")), result)
+        result = self._trigger_pan302_upload_sync(target_path)
+        self._save_action("pan302_upload_sync", bool(result.get("success")), result)
 
     @_event_register(EventType.UserMessage if EventType else None)
     def evt_user_message(self, event: Event):
@@ -512,10 +534,8 @@ class Pan302Bridge(_PluginBase):
         include_dirs = self._split_config_values(self._include_dirs)
         if not include_dirs:
             return True
-        normalized_target = target_path.replace("\\", "/")
         for include_dir in include_dirs:
-            normalized_include = include_dir.replace("\\", "/").rstrip("/")
-            if normalized_include and normalized_target.startswith(normalized_include):
+            if self._is_path_under(target_path, include_dir):
                 return True
         return False
 
@@ -566,49 +586,146 @@ class Pan302Bridge(_PluginBase):
             self._log_warning("快捷指令调用 pan302 失败：%s，%s" % (action, result["message"]))
         return self._save_shortcut_action(result)
 
-    def _trigger_pan302_upload_by_path(self, target_path: str) -> Dict[str, Any]:
+    def _load_pan302_sync_configs(self) -> List[dict]:
+        response = self._pan302_get("/api/config/sync-configs", timeout=30)
+        if isinstance(response, list):
+            return [item for item in response if isinstance(item, dict)]
+        if isinstance(response, dict):
+            for key in ("syncConfigs", "sync_configs", "configs", "items", "data"):
+                items = response.get(key)
+                if isinstance(items, list):
+                    return [item for item in items if isinstance(item, dict)]
+        return []
+
+    def _match_pan302_upload_sync_names(self, target_path: str) -> Tuple[List[str], List[dict], str]:
+        configured_names = self._split_config_values(self._pan302_upload_sync_names)
+        if configured_names:
+            return configured_names, [], "configured"
+
+        sync_configs = self._load_pan302_sync_configs()
+        matches: List[dict] = []
+        for cfg in sync_configs:
+            name = (cfg.get("name") or "").strip()
+            local_path = cfg.get("localPath") or cfg.get("local_path") or ""
+            if name and self._is_path_under(target_path, local_path):
+                matches.append(cfg)
+
+        if not matches:
+            return [], [], "auto"
+
+        matches.sort(
+            key=lambda cfg: len(
+                self._normalize_compare_path(cfg.get("localPath") or cfg.get("local_path") or "")
+            ),
+            reverse=True,
+        )
+        best_len = len(self._normalize_compare_path(matches[0].get("localPath") or matches[0].get("local_path") or ""))
+        names: List[str] = []
+        best_matches: List[dict] = []
+        for cfg in matches:
+            local_path = cfg.get("localPath") or cfg.get("local_path") or ""
+            if len(self._normalize_compare_path(local_path)) != best_len:
+                break
+            name = (cfg.get("name") or "").strip()
+            if name and name not in names:
+                names.append(name)
+                best_matches.append(cfg)
+        return names, best_matches, "auto"
+
+    @staticmethod
+    def _summarize_sync_configs(configs: List[dict]) -> List[dict]:
+        summary: List[dict] = []
+        for cfg in configs[:10]:
+            summary.append(
+                {
+                    "name": cfg.get("name"),
+                    "localPath": cfg.get("localPath") or cfg.get("local_path"),
+                    "cloudPath": cfg.get("cloudPath") or cfg.get("cloud_path"),
+                    "isEnable": cfg.get("isEnable"),
+                }
+            )
+        return summary
+
+    def _trigger_pan302_upload_sync(self, target_path: str) -> Dict[str, Any]:
         result: Dict[str, Any] = {
             "success": False,
             "target": "pan302",
-            "action": "upload_by_path",
+            "action": "upload_sync",
             "path": target_path,
             "time": self._now(),
+            "upload_sync_names": [],
         }
         try:
             if not Path(target_path).exists():
                 self._log_warning("整理完成文件在 MoviePilot 宿主内不存在，仍尝试通知 pan302：%s" % target_path)
-            response = self._pan302_get(
-                "/api/sync/upload-by-path",
-                params={"path": target_path},
-                timeout=30,
-                auth_mode="bearer",
-            )
-            result.update({"success": True, "result": response})
+
+            sync_names, matched_configs, match_mode = self._match_pan302_upload_sync_names(target_path)
+            result["match_mode"] = match_mode
+            result["upload_sync_names"] = sync_names
+            if matched_configs:
+                result["matched_sync_configs"] = self._summarize_sync_configs(matched_configs)
+
+            if not sync_names:
+                result["message"] = (
+                    "未找到匹配的 pan302 上传同步配置。请确认 pan302 目录同步设置里的本地来源目录 "
+                    "localPath 覆盖 MoviePilot 整理路径，或在插件中填写 pan302 上传同步名称。"
+                )
+            else:
+                responses: List[dict] = []
+                errors: List[dict] = []
+                for sync_name in sync_names:
+                    api_path = "/api/transfer/sync/upload/%s" % quote(sync_name, safe="")
+                    try:
+                        response = self._pan302_post(api_path, payload={}, timeout=30, auth_mode="bearer")
+                        responses.append({"name": sync_name, "path": api_path, "result": response})
+                    except Exception as err:
+                        errors.append({"name": sync_name, "path": api_path, "message": self._error_message(err)})
+
+                result["results"] = responses
+                if errors:
+                    result["errors"] = errors
+                    result["message"] = "部分或全部 pan302 上传同步触发失败：%s" % self._compact(errors)
+                else:
+                    result["success"] = True
         except Exception as err:
             result["message"] = self._error_message(err)
 
         self.save_data("last_pan302_upload", result)
         if result.get("success"):
-            self._log_info("pan302 upload-by-path 调用成功：%s" % target_path)
+            self._log_info(
+                "pan302 上传同步触发成功：%s，任务：%s"
+                % (target_path, ",".join(result.get("upload_sync_names") or []))
+            )
         else:
-            self._log_warning("pan302 upload-by-path 调用失败：%s" % result.get("message"))
+            self._log_warning("pan302 上传同步触发失败：%s" % result.get("message"))
         return result
 
     def _submit_pan302_share(self, share_url: str) -> Dict[str, Any]:
+        parsed = self._parse_115_share_url(share_url)
+        receive_code = parsed[1] if parsed and parsed[1] else ""
+        driver_type = "115"
         result: Dict[str, Any] = {
             "success": False,
             "target": "pan302",
             "action": "save_share",
             "url": share_url,
             "folder": self._transfer_folder,
+            "dstId": self._transfer_folder,
+            "driverType": driver_type,
+            "receiveCode": receive_code,
             "time": self._now(),
         }
         try:
-            response = self._pan302_get(
-                "/strm/api/task/save-share",
-                params={"url": share_url, "folder": self._transfer_folder},
+            response = self._pan302_post(
+                "/api/transfer/share-receive",
+                payload={
+                    "shareUrl": share_url,
+                    "receiveCode": receive_code,
+                    "dstId": self._transfer_folder,
+                    "driverType": driver_type,
+                },
                 timeout=30,
-                auth_mode="raw",
+                auth_mode="bearer",
             )
             result.update({"success": True, "result": response})
         except Exception as err:
@@ -842,6 +959,23 @@ class Pan302Bridge(_PluginBase):
                                 "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
+                                        "component": "VTextarea",
+                                        "props": {
+                                            "model": "pan302_upload_sync_names",
+                                            "label": "pan302 上传同步名称（可选）",
+                                            "placeholder": "留空自动匹配 pan302 目录同步本地来源目录；多个名称可换行或逗号分隔",
+                                            "rows": 2,
+                                            "auto-grow": True,
+                                            "clearable": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
                                         "component": "VTextField",
                                         "props": {
                                             "model": "pan302_url",
@@ -967,6 +1101,7 @@ class Pan302Bridge(_PluginBase):
             "enabled": False,
             "pan302_url": "",
             "pan302_token": "",
+            "pan302_upload_sync_names": "",
             "include_dirs": "",
             "transfer_folder": "",
             "notify_on_callback": True,
@@ -1028,9 +1163,10 @@ class Pan302Bridge(_PluginBase):
                                 "props": {
                                     "type": "info" if self._pan302_url and self._pan302_token else "warning",
                                     "variant": "tonal",
-                                    "text": "pan302 主动联动：%s；包含目录：%s"
+                                    "text": "pan302 主动联动：%s；上传同步名称：%s；包含目录：%s"
                                     % (
                                         "已配置" if self._pan302_url and self._pan302_token else "未完整配置",
+                                        self._compact(self._split_config_values(self._pan302_upload_sync_names)),
                                         self._compact(self._split_config_values(self._include_dirs)),
                                     ),
                                 },

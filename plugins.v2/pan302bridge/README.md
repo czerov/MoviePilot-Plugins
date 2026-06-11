@@ -4,7 +4,7 @@
 
 插件支持两条链路：
 
-- MoviePilot 整理完成后，主动通知 pan302 根据本地路径处理文件。
+- MoviePilot 整理完成后，主动触发 pan302 的上传同步任务。
 - pan302 回调 MoviePilot 后，刷新 Emby 或 MoviePilot 已配置的媒体服务器。
 
 如果填写了 Emby 地址和 API Key，插件会直连 Emby 刷新媒体库。没有填写时，插件会调用 MoviePilot 已启用的媒体服务器刷新能力。
@@ -12,7 +12,7 @@
 ## 功能
 
 - 接收 pan-302 回调。
-- 监听 MoviePilot 整理完成事件，调用 pan302 的 `upload-by-path`。
+- 监听 MoviePilot 整理完成事件，按整理路径匹配 pan302 目录同步配置并触发上传同步。
 - 监听 MoviePilot 用户消息中的 115 分享链接，调用 pan302 分享转存。
 - 保存最近一次回调记录。
 - 根据事件名触发 MoviePilot 已启用媒体服务器刷新。
@@ -28,6 +28,7 @@
 - `启用 pan-302 联动`：是否启用插件。
 - `pan302 地址`：例如 `http://192.168.6.36:3000`，用于 MoviePilot 主动调用 pan302。
 - `pan302 Token`：pan302 的 Token。
+- `pan302 上传同步名称（可选）`：MoviePilot 整理完成后要触发的 pan302 目录同步任务名称。留空时插件会自动读取 pan302 的目录同步配置，并按整理完成路径匹配 `localPath`；如果 MoviePilot 和 pan302 容器内路径不一致，建议手工填写任务名称。多个名称可换行或逗号分隔。
 - `115 分享转存目录`：收到 115 分享链接时提交给 pan302 的转存目录。
 - `整理完成包含目录`：可选。MoviePilot 整理完成的目标路径只有命中这些目录才会通知 pan302；留空则不限制。
 - `收到 pan-302 回调后发送 MoviePilot 通知`：启用后收到回调会发送通知。
@@ -71,17 +72,18 @@ GET  /shortcut/rule-trigger
 MoviePilot 主动调用 pan302 时会使用：
 
 ```text
-GET /api/sync/upload-by-path?path=<整理完成路径>
-GET /strm/api/task/save-share?url=<115分享链接>&folder=<115分享转存目录>
+GET /api/config/sync-configs
+POST /api/transfer/sync/upload/:name
 POST /api/transfer/share-receive
 POST /api/strm/sync
 POST /api/strm/sync/:name
-POST /api/transfer/sync/upload/:name
 POST /api/transfer/rules/trigger/:name
 GET /api/health
 GET /api/transfer/status
 GET /api/strm/status
 ```
+
+MoviePilot 整理完成自动联动 pan302 时，插件不会再调用旧的 `/api/sync/upload-by-path`。当前 pan302 的上传同步入口是按“目录同步设置”的任务名称触发，所以插件会优先使用你填写的 `pan302 上传同步名称（可选）`；如果留空，则自动读取 pan302 目录同步配置，找到 `localPath` 覆盖整理完成路径的任务，再触发该任务。
 
 直连 Emby 时，插件会调用：
 
